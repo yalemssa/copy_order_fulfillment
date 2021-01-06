@@ -1,0 +1,11 @@
+{"tenant": "YUL",
+	"preservica_api_url": "preservica.library.yale.edu/api/",
+	"preservica_username": "",
+	"preservica_password": "",
+	"input_csv": "",
+	"output_folder": "",
+	"box_folder_id": "",
+	"box_token": "",
+	"box_client_id": "",
+	"box_client_secret": "",
+	"box_path_to_files": ""}
