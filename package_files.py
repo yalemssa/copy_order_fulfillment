@@ -10,12 +10,16 @@ from rich.progress import track
 def main():
     try:
         console.log('Starting...')
-        dirpath = "data/orders/"
+        dirpath = "data/orders/to_zip"
+        output_path = f"data/orders/to_send/"
         dir_list = os.listdir(dirpath)
+        print(dir_list)
         for directory in track(dir_list):
-            full_path = f"{dirpath}{directory}"
-            if os.path.isdir(full_path):
-                shutil.make_archive(full_path, 'zip', full_path)
+            if directory not in ("to_send", ".DS_Store"):
+                full_path = f"{dirpath}/{directory}"
+                final_path = f"{output_path}/{directory}"
+                if os.path.isdir(full_path):
+                    shutil.make_archive(final_path, 'zip', full_path)
     except Exception:
         console.print_exception()
     finally:

@@ -23,5 +23,5 @@ progress = Progress(
     TransferSpeedColumn(),
     "•",
     TimeRemainingColumn(),
-    console=console
+    console=console,
 )

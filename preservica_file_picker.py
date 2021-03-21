@@ -1,4 +1,4 @@
-#/usr/bin/python3
+ #/usr/bin/python3
 
 import csv
 from datetime import datetime
@@ -61,11 +61,13 @@ class PreservicaDownloader():
             console.log(response.request.url)
             raise SystemExit
 
-    def send_request(self, master_task, csv_row):
+    def send_request(self, csv_row, master_task, directory_path):
         try:
             headers = {'Preservica-Access-Token': self.token}
             url = csv_row['direct_download_link']
             file_size = csv_row['size_in_bytes']
+            filename = csv_row['filename']
+            #print(file_size)
             '''See https://2.python-requests.org/en/master/user/advanced/#body-content-workflow
             #for more info on how streaming works; basically only downloads the thing until you
             access the "content" attribute. THe 'get' call downloads the response headers only
@@ -79,37 +81,31 @@ class PreservicaDownloader():
                 #the overall bar will display properly
                 if req.status_code == 200:
                     try:
-                        filename = self.get_filename(req.headers)
-                        #print(filename)
+                        #filename = self.get_filename(req.headers)
                         download_task = progress.add_task("download", filename=filename, start=False)
-                        #print('Task added')
-                        #print(download_task)
                         progress.update(download_task, total=int(file_size))
                         progress.start_task(download_task)
-                        with open(f"{self.dirpath}/{filename}", 'wb') as outfile:
+                        with open(f"{directory_path}/{filename}", 'wb') as outfile:
                             for chunk in req.iter_content(1024):
                                 #progress.advance(download_task, len(chunk))
                                 progress.update(download_task, advance=len(chunk))
-                                #not at all sure this will work...what about yielding it?????????
-                                #then will have output for the process results function rather
-                                #than passing.
-                                #could I yield the chunk here? how will it know what outfile to write to?
+                                #this works
+                                progress.update(master_task, advance=len(chunk))
                                 outfile.write(chunk)
-                                #yield chunk
-                            #self.process_results(chunk, filename)
-                        progress.advance(master_task, int(file_size))
+                        progress.remove_task(download_task)
                     except Exception:
                         console.print_exception()
-                        #print(traceback.format_exc())
                 if req.status_code == 404:
                     #what happens here in terms of the progress bar?
                     #it doesn't create one, but what happens?
                     console.log(f'[bold red]{url}: {req.status_code}[/bold red]')
                     return '404 NOT FOUND'
+                if req.status_code == 502:
+                    console.log(f'[bold red]{url}: {req.status_code}[/bold red]')
                 elif req.status_code == 401:
                     #same question as above
                     self.token = self.__token__()
-                    return self.send_request(url, file_size)
+                    return self.send_request(url, csv_row, master_task)
                 else:
                     #also...
                     return f'SOME ERROR: {req.status_code}'
@@ -118,11 +114,11 @@ class PreservicaDownloader():
             console.print_exception()
             #return f'SOME ERROR: {traceback.format_exc()}'
 
-    def download_file(self, download_task, master_task, csv_row):
-        #the identifiers are in the first and only row of the CSV
-        preservica_uri = csv_row['direct_download_link']
-        file_size = csv_row['size_in_bytes']
-        self.send_request(preservica_uri, file_size)
+    # def download_file(self, download_task, master_task, csv_row):
+    #     #the identifiers are in the first and only row of the CSV
+    #     preservica_uri = csv_row['direct_download_link']
+    #     file_size = csv_row['size_in_bytes']
+    #     self.send_request(preservica_uri, file_size)
         # if isinstance(data_file, requests.models.Response):
         #     data_content = data_file.content
         #     file_name = self.get_filename(data_file)
@@ -162,10 +158,12 @@ def opencsvdict(input_csv=None):
         if input_csv in ('quit', 'Q', 'Quit'):
             raise SystemExit
         infile = open(input_csv, 'r', encoding='utf-8')
+        #DON'T USE THIS YET
         #skips first 2 rows of CSV file with weird header
-        for i in range(3):
-            next(infile)
-        rowcount = sum(1 for line in open(input_csv).readlines()) - 4
+        # for i in range(3):
+        #     next(infile)
+        rowcount = sum(1 for line in open(input_csv).readlines()) - 1
+        #rowcount = sum(1 for line in open(input_csv).readlines()) - 4
         return csv.DictReader(infile), rowcount, input_csv
     except FileNotFoundError:
         return opencsvdict()
@@ -187,57 +185,60 @@ def wrap_up():
     console.log("[#b05279]Exiting...[#b05279]")
     console.save_text('console_output.txt')
 
-def run_multiprocess(client, csvfile, chunks, rowcount):
-	with progress:
-	    with Pool() as pool:
-	        #HAVE TO HAVE THIS IN THE LOOP OR IT DOESNT WORK
-	        #maybe can define the master task here?
-	        #master_task = progress.add_task("overall", total=total_file_size)
-	        for _ in pool.imap_unordered(client.download_file, csvfile, chunksize=chunks):
-	            pass
-	            #progress.advance(master_task, len(data))
-	            #client.process_results(data, filename)
+def run_thread_pool_executor(pool, client, csvfile, master_task, directory_path):
+    try:
+        for row in csvfile:
+            pool.submit(client.send_request, row, master_task, directory_path)
+    except Exception:
+        console.print_exception()
 
-def run_thread_pool_executor(client, csvfile, total_file_size):
-    master_task = progress.add_task("overall", total=total_file_size, filename="Overall Progress")
-    with progress:
-        #print('This is happening')
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            try:
-                #print('Is this happening?')
-                for row in csvfile:
-                    #print('what seems to be the problem?')
-                    #download_task = progress.add_task("download", start=False)
-                    pool.submit(client.send_request, master_task, row)
-            except Exception:
-                console.print_exception()
-
-def get_total_file_size(input_csv):
+def get_total_file_size(input_files, input_directory):
     '''Gets the total file size of the files to be downloaded.
     NOTE: using this requires using the report from AS, which
     limits utility for downloading Preservation manifestations,
     since that data will not be in AS. BUT it wopuld be in any report
     that I run for folks'''
     #master_task = 
-    with open(input_csv, encoding='utf8') as csvfile:
-        csv_reader = csv.reader(csvfile)
-        #skips the 
-        for _ in range(4):
-            next(csv_reader)
-        return sum(int(row[5]) for row in csv_reader)
+    total_size_combo = []
+    for filename in input_files:
+        with open(f"{input_directory}/{filename}", encoding='utf8') as csvfile:
+            if filename != '.DS_Store':
+                print(filename)
+                csv_reader = csv.reader(csvfile)
+                next(csv_reader)
+                #skips the 
+                # for _ in range(4):
+                #     next(csv_reader)
+                total_size = sum(int(row[6]) for row in csv_reader)
+                total_size_combo.append(total_size)
+    return sum(total_size_combo)
+
+def configure_output_dir(config_file, filename):
+    output_dir = config_file.get('output_folder')
+    subdir = filename.replace('.csv', '')
+    full_path = f"{output_dir}/{subdir}"
+    if not os.path.exists(full_path):
+        os.mkdir(full_path)
+    return full_path
 
 
 def main():
     welcome()
-    cfg = json.load(open('config.json'))
-    csvfile, rowcount, input_csv = opencsvdict(cfg.get('input_csv'))
-    total_file_size = get_total_file_size(input_csv)
-    #chunks = int(rowcount/os.cpu_count())
-    #download_task = progress.add_task("download", start=False)
+    cfg = json.load(open('config/config.json'))
+    input_directory = cfg.get('input_folder')
+    input_files = os.listdir(input_directory)
     try:
         client = PreservicaDownloader(configure(cfg, 'output_folder'), configure(cfg, 'preservica_username'), configure_password(cfg), configure(cfg, 'tenant'), configure(cfg, 'preservica_api_url'))
-        #run_multiprocess(client, csvfile, chunks, rowcount)
-        run_thread_pool_executor(client, csvfile, total_file_size)
+        print('Getting total file size')
+        total_file_size = get_total_file_size(input_files, input_directory)
+        master_task = progress.add_task("overall", total=total_file_size, filename="Overall Progress")
+        with progress:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for filename in input_files:
+                    if filename != '.DS_Store':
+                        csvfile, rowcount, input_csv = opencsvdict(f"{input_directory}/{filename}") 
+                        directory_path = configure_output_dir(cfg, filename)
+                        run_thread_pool_executor(pool, client, csvfile, master_task, directory_path)
     except (KeyboardInterrupt, SystemExit):
         console.print('[bold red]Aborted![/bold red]')
     except Exception:
