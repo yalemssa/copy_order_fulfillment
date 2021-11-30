@@ -5,10 +5,14 @@ import json
 import traceback
 import gspread
 
+import copy_order_logging
+
+log = copy_order_logging.get_logger(__name__)
 
 def get_spreadsheet_data(client, spreadsheet_id):
 	# Opens the spreadsheet and returns all values as a list of lists
-	sheet = client.open_by_key(spreadsheet_id).sheet1	
+	# this only opens the first sheet
+	sheet = client.open_by_key(spreadsheet_id).sheet1
 	return sheet, sheet.get_all_values()
 
 def get_outstanding_requests_report(spreadsheet_data):
@@ -77,10 +81,10 @@ def update_data(cfg):
 def main():
 	cfg = json.load(open('config/config.json', 'r', encoding='utf-8'))
 	header_row, outstanding_requests = create_aeon_report(cfg)
-	# with open('aeon_report.csv', 'a', encoding='utf-8') as csvinfile:
-	# 	csvin = csv.writer(csvinfile)
-	# 	csvin.writerow(header_row)
-	# 	csvin.writerows(outstanding_requests)
+	with open('data/aeon_report.csv', 'a', encoding='utf-8') as csvinfile:
+		csvin = csv.writer(csvinfile)
+		csvin.writerow(header_row)
+		csvin.writerows(outstanding_requests)
 
 
 if __name__ == "__main__":

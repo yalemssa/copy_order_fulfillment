@@ -9,7 +9,8 @@ Scripts to support an MSSA workflow for fulfilling copy orders for already-digit
 * `get_spreadsheet_data.py`: Gets patron reprographics data from Google Sheets API
 * `create_shared_links.py`: uploads .zip files to Yale Box, creates a shared public link which expires after 10 days, returns a report containing patron name, Aeon username, order number, and box link.
 * `update_spreadsheet_data.py`: Updates patron reprographics data via Google Sheets API
-* `email_template.py`: Generates boilerplate email text to send to patron using report from `create_shared_links.py`
+* `generate_email_template.py`: Generates boilerplate email text to send to patron using report from `create_shared_links.py`
+* `clean_directories.py`: Moves or deletes files and folders after files are sent
 * `constants.py`: utility file to hold console app styling data
 * `config/config.json`: user config settings
 * `config/service_account.json`: Placeholder for Google API config file

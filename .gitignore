@@ -1,6 +1,13 @@
 # Compiled python modules.
 *.pyc
 
+console_output.txt
+
+/logs/log.log
+/config/config.json
+/config/jtwconfig.json
+/config/service_account.json
+
 # Setuptools distribution folder.
 /dist/
 

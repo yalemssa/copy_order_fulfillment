@@ -4,6 +4,7 @@ import csv
 from datetime import datetime
 #from functools import partial
 import json
+from lxml import etree
 import os
 import sys
 import traceback
@@ -16,6 +17,8 @@ from rich.progress import track
 from rich.padding import Padding
 
 from constants import console, progress
+
+import copy_order_logging
 
 '''Script to retrieve metadata from Preservica content API'''
 
@@ -40,6 +43,7 @@ from constants import console, progress
 
 """
 
+log = copy_order_logging.get_logger(__name__)
 
 class PreservicaDownloader():
     def __init__(self, dirpath, username, pw, tenant, api_url):
@@ -61,12 +65,18 @@ class PreservicaDownloader():
             console.log(response.request.url)
             raise SystemExit
 
-    def send_request(self, csv_row, master_task, directory_path):
+    def get_security_code(self, url, headers):
+        xml_data = self.session.get(url, headers=headers)
+        tree = etree.fromstring(bytes(xml_data.text, encoding='utf8'))
+        return tree.find(".//{http://www.tessella.com/XIP/v4}DeliverableUnits/{http://www.tessella.com/XIP/v4}DeliverableUnit/{http://www.tessella.com/XIP/v4}SecurityTag").text
+
+    def send_request(self, csv_row, master_task, directory_path, try_number=0):
         try:
             headers = {'Preservica-Access-Token': self.token}
             url = csv_row['direct_download_link']
             file_size = csv_row['size_in_bytes']
-            filename = csv_row['filename']
+            filename = csv_row['filename'].replace('(*)', '')
+            deliverable_unit = f"https://preservica.library.yale.edu/api/entity/deliverableUnits/{csv_row['deliverable_unit']}"
             #print(file_size)
             '''See https://2.python-requests.org/en/master/user/advanced/#body-content-workflow
             #for more info on how streaming works; basically only downloads the thing until you
@@ -75,6 +85,12 @@ class PreservicaDownloader():
             Also either need to call close on the request or put it in the context manager i.e.
             what I did below
             '''
+            security_code = self.get_security_code(deliverable_unit, headers)
+            if "CLOSED" in security_code:
+                # this is fine for now, since I am still running the scripts
+                filename = f"RESTRICTED_{filename}"
+                #console.print(filename)
+                log.debug(filename)
             with self.session.get(url, headers=headers, stream=True) as req:
                 #resets the bar for each new download; how will this work with multiprocessing?
                 #possibly each processor will have it's own bar, which is fine because 
@@ -93,7 +109,8 @@ class PreservicaDownloader():
                                 progress.update(master_task, advance=len(chunk))
                                 outfile.write(chunk)
                         progress.remove_task(download_task)
-                    except Exception:
+                    except Exception as e:
+                        log.error(e)
                         console.print_exception()
                 if req.status_code == 404:
                     #what happens here in terms of the progress bar?
@@ -101,7 +118,14 @@ class PreservicaDownloader():
                     console.log(f'[bold red]{url}: {req.status_code}[/bold red]')
                     return '404 NOT FOUND'
                 if req.status_code == 502:
-                    console.log(f'[bold red]{url}: {req.status_code}[/bold red]')
+                    if try_number > 0 and try_number < 3:
+                        console.log(f'Trying again, try number {try_number}')
+                        console.log(f'[bold red]{url}: {req.status_code}[/bold red]')
+                        return self.send_request(url, csv_row, master_task, try_number=try_number + 1)
+                    if try_number > 2:
+                        console.log(f'Exceeded 2 tries, skipping record')
+                        console.log(f'[bold red]{url}: {req.status_code}[/bold red]')
+                        return '502 BAD GATEWAY'
                 elif req.status_code == 401:
                     #same question as above
                     self.token = self.__token__()
@@ -109,8 +133,8 @@ class PreservicaDownloader():
                 else:
                     #also...
                     return f'SOME ERROR: {req.status_code}'
-        except Exception:
-            #console.log(traceback.format_exc())
+        except Exception as e:
+            log.error(e)
             console.print_exception()
             #return f'SOME ERROR: {traceback.format_exc()}'
 
@@ -160,10 +184,10 @@ def opencsvdict(input_csv=None):
         infile = open(input_csv, 'r', encoding='utf-8')
         #DON'T USE THIS YET
         #skips first 2 rows of CSV file with weird header
-        # for i in range(3):
-        #     next(infile)
-        rowcount = sum(1 for line in open(input_csv).readlines()) - 1
-        #rowcount = sum(1 for line in open(input_csv).readlines()) - 4
+        for i in range(3):
+            next(infile)
+        #rowcount = sum(1 for line in open(input_csv).readlines()) - 1
+        rowcount = sum(1 for line in open(input_csv).readlines()) - 4
         return csv.DictReader(infile), rowcount, input_csv
     except FileNotFoundError:
         return opencsvdict()
@@ -183,13 +207,15 @@ def wrap_up():
     #link to directory...
     console.rule("[color(11)]Goodbye![/color(11)]")
     console.log("[#b05279]Exiting...[#b05279]")
-    console.save_text('console_output.txt')
+    #console.save_text('console_output.txt')
 
 def run_thread_pool_executor(pool, client, csvfile, master_task, directory_path):
     try:
         for row in csvfile:
-            pool.submit(client.send_request, row, master_task, directory_path)
-    except Exception:
+            if row['to_download'] != '':
+                pool.submit(client.send_request, row, master_task, directory_path)
+    except Exception as e:
+        log.error(e)
         console.print_exception()
 
 def get_total_file_size(input_files, input_directory):
@@ -203,13 +229,13 @@ def get_total_file_size(input_files, input_directory):
     for filename in input_files:
         with open(f"{input_directory}/{filename}", encoding='utf8') as csvfile:
             if filename != '.DS_Store':
-                print(filename)
+                # print(filename)
                 csv_reader = csv.reader(csvfile)
                 next(csv_reader)
-                #skips the 
-                # for _ in range(4):
-                #     next(csv_reader)
-                total_size = sum(int(row[6]) for row in csv_reader)
+                #skips the first few rows
+                for _ in range(4):
+                    next(csv_reader)
+                total_size = sum(int(row[6]) for row in csv_reader if row[0] != '')
                 total_size_combo.append(total_size)
     return sum(total_size_combo)
 
@@ -229,7 +255,7 @@ def main():
     input_files = os.listdir(input_directory)
     try:
         client = PreservicaDownloader(configure(cfg, 'output_folder'), configure(cfg, 'preservica_username'), configure_password(cfg), configure(cfg, 'tenant'), configure(cfg, 'preservica_api_url'))
-        print('Getting total file size')
+        log.debug('Getting total file size')
         total_file_size = get_total_file_size(input_files, input_directory)
         master_task = progress.add_task("overall", total=total_file_size, filename="Overall Progress")
         with progress:
@@ -240,10 +266,11 @@ def main():
                         directory_path = configure_output_dir(cfg, filename)
                         run_thread_pool_executor(pool, client, csvfile, master_task, directory_path)
     except (KeyboardInterrupt, SystemExit):
+        log.debug('Aborted')
         console.print('[bold red]Aborted![/bold red]')
-    except Exception:
+    except Exception as e:
         console.print_exception()
-        console.log(traceback.format_exc())
+        log.error(e)
     finally:
         wrap_up()
         

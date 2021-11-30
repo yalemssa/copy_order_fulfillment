@@ -1,4 +1,5 @@
-gspread==3.6.0
-requests==2.22.0
 boxsdk==2.11.0
-rich==9.13.0
+lxml==4.6.2
+requests==2.25.1
+gspread==3.6.0
+rich==10.15.1
