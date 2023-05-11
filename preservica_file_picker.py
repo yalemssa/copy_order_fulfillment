@@ -4,12 +4,14 @@ import csv
 from datetime import datetime
 #from functools import partial
 import json
-from lxml import etree
+#from lxml import etree
+import xml.etree.ElementTree as ET
 import os
 import sys
 import traceback
 #from multiprocessing import Pool
 from concurrent.futures import ThreadPoolExecutor
+import warnings
 
 import requests
 from rich import print
@@ -43,58 +45,86 @@ import copy_order_logging
 
 """
 
+# suppress warnings during testing
+warnings.filterwarnings("ignore")
 log = copy_order_logging.get_logger(__name__)
 
 class PreservicaDownloader():
-    def __init__(self, dirpath, username, pw, tenant, api_url):
+    def __init__(self, dirpath, username, pw, api_url):
         self.dirpath = dirpath
         self.username = username
         self.pw = pw
-        self.tenant = tenant
         self.api_url = api_url
         self.session = requests.Session()
         self.token = self.__token__()
         
+    # def __token__(self):
+    #     response = requests.post(f'https://{self.api_url}accesstoken/login?username={self.username}&password={self.pw}&tenant={self.tenant}')
+    #     if response.status_code == 200:
+    #         console.log('[bold green]Connected.[/bold green]')
+    #         return response.json()['token']
+    #     else:
+    #         console.log(f"[bold red]Get new token failed with error code: {response.status_code}[/bold red]")
+    #         console.log(response.request.url)
+    #         raise SystemExit
+
     def __token__(self):
-        response = requests.post(f'https://{self.api_url}accesstoken/login?username={self.username}&password={self.pw}&tenant={self.tenant}')
+        response = requests.post(f'https://{self.api_url}accesstoken/login', data=f'username={self.username}&password={self.pw}', headers={'accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded'}, verify=False)
         if response.status_code == 200:
             console.log('[bold green]Connected.[/bold green]')
-            return response.json()['token']
+            return {'Preservica-Access-Token': response.json()['token']}
         else:
             console.log(f"[bold red]Get new token failed with error code: {response.status_code}[/bold red]")
             console.log(response.request.url)
             raise SystemExit
 
     def get_security_code(self, url, headers):
+        # this needs to be redone
         xml_data = self.session.get(url, headers=headers)
         tree = etree.fromstring(bytes(xml_data.text, encoding='utf8'))
         return tree.find(".//{http://www.tessella.com/XIP/v4}DeliverableUnits/{http://www.tessella.com/XIP/v4}DeliverableUnit/{http://www.tessella.com/XIP/v4}SecurityTag").text
 
+
+    def get_bitstream(self, ref):
+        content_objects = []
+        # Using Access/1 because just doing Access doesn't reliably get what I need. Will continue to keep
+        # an eye on things to make sure that 
+        req = self.session.get(f"https://{self.api_url}entity/information-objects/{ref}/representations/Access/1", headers=self.token, verify=False)
+        if req.status_code == 200:
+            # also want to include one with just a single access copy so I can see the dif
+            #print(req.text, '\n')
+            xml_data = ET.fromstring(req.text)
+            content_object_data = xml_data.iter("{http://preservica.com/EntityAPI/v6.5}ContentObject")
+            for element in content_object_data:
+                #bitstream_url = f"https://{self.api_url}entity/content-objects/{element.attrib.get('ref')}/generations/1/bitstreams/1/content"
+                bitstream_url = f"https://{self.api_url}entity/content-objects/{element.attrib.get('ref')}/generations/1/bitstreams/1"
+                content_objects.append(bitstream_url)
+                # content_objects.append({'info_object_ref': ref, 'content_object_title': element.attrib.get('title'), 'content_object_ref': element.attrib.get('ref'), 'type': element.attrib.get('type'), 'bitstream_url': bitstream_url})
+        else:
+            # better error handling here
+            print(f'Info object not found: {ref}')
+            print(f'Error: {req.status_code}')
+        return content_objects
+
+
+    def get_bitstream_metadata(self, urls):
+        req = self.session.get(urls[0], headers=self.token)
+        if req.status_code == 200:
+            metadata = ET.fromstring(req.text)
+            filename = metadata.find(".//{http://preservica.com/XIP/v6.5}Bitstream/{http://preservica.com/XIP/v6.5}Filename")
+            file_size = metadata.find(".//{http://preservica.com/XIP/v6.5}Bitstream/{http://preservica.com/XIP/v6.5}FileSize")
+            # need some better error handling here
+            return filename.text, file_size.text
+        else:
+            print(f'Metadata not found for bitstream {urls[0]}')
+            return 0, 0
+
     def send_request(self, csv_row, master_task, directory_path, try_number=0):
         try:
-            headers = {'Preservica-Access-Token': self.token}
-            url = csv_row['direct_download_link']
-            file_size = csv_row['size_in_bytes']
-            filename = csv_row['filename'].replace('(*)', '')
-            deliverable_unit = f"https://preservica.library.yale.edu/api/entity/deliverableUnits/{csv_row['deliverable_unit']}"
-            #print(file_size)
-            '''See https://2.python-requests.org/en/master/user/advanced/#body-content-workflow
-            #for more info on how streaming works; basically only downloads the thing until you
-            access the "content" attribute. THe 'get' call downloads the response headers only
-
-            Also either need to call close on the request or put it in the context manager i.e.
-            what I did below
-            '''
-            security_code = self.get_security_code(deliverable_unit, headers)
-            if "CLOSED" in security_code:
-                # this is fine for now, since I am still running the scripts
-                filename = f"RESTRICTED_{filename}"
-                #console.print(filename)
-                log.debug(filename)
-            with self.session.get(url, headers=headers, stream=True) as req:
-                #resets the bar for each new download; how will this work with multiprocessing?
-                #possibly each processor will have it's own bar, which is fine because 
-                #the overall bar will display properly
+            # need to make this better - want to know if there are multiple access copies for things - lol
+            urls = self.get_bitstream(csv_row['deliverable_unit'])
+            filename, file_size = self.get_bitstream_metadata(urls)
+            with self.session.get(f"{urls[0]}/content", headers=self.token, stream=True) as req:
                 if req.status_code == 200:
                     try:
                         #filename = self.get_filename(req.headers)
@@ -174,7 +204,7 @@ def configure_password(config_file):
         return console.input(f"[#6c99bb]Please enter your preservica_password: [/#6c99bb]", password=True)
 
 #Open a CSV in dictreader mode
-def opencsvdict(input_csv=None):
+def opencsvdict(input_csv=None, skip_rows=True):
     """Opens a CSV in DictReader mode."""
     try:
         if input_csv is None:
@@ -182,12 +212,12 @@ def opencsvdict(input_csv=None):
         if input_csv in ('quit', 'Q', 'Quit'):
             raise SystemExit
         infile = open(input_csv, 'r', encoding='utf-8')
-        #DON'T USE THIS YET
-        #skips first 2 rows of CSV file with weird header
-        for i in range(3):
-            next(infile)
-        #rowcount = sum(1 for line in open(input_csv).readlines()) - 1
-        rowcount = sum(1 for line in open(input_csv).readlines()) - 4
+        if skip_rows:
+            for i in range(3):
+                next(infile)
+            rowcount = sum(1 for line in open(input_csv).readlines()) - 1
+        else:
+            rowcount = sum(1 for line in open(input_csv).readlines()) - 4
         return csv.DictReader(infile), rowcount, input_csv
     except FileNotFoundError:
         return opencsvdict()
@@ -218,13 +248,15 @@ def run_thread_pool_executor(pool, client, csvfile, master_task, directory_path)
         log.error(e)
         console.print_exception()
 
-def get_total_file_size(input_files, input_directory):
+def get_total_file_size(input_files, input_directory, skip_rows=True):
     '''Gets the total file size of the files to be downloaded.
     NOTE: using this requires using the report from AS, which
     limits utility for downloading Preservation manifestations,
     since that data will not be in AS. BUT it wopuld be in any report
     that I run for folks'''
     #master_task = 
+
+    # Want to start pulling directly from Preservica, so will not need this anymore.
     total_size_combo = []
     for filename in input_files:
         with open(f"{input_directory}/{filename}", encoding='utf8') as csvfile:
@@ -232,10 +264,11 @@ def get_total_file_size(input_files, input_directory):
                 # print(filename)
                 csv_reader = csv.reader(csvfile)
                 next(csv_reader)
-                #skips the first few rows
-                for _ in range(4):
-                    next(csv_reader)
-                total_size = sum(int(row[6]) for row in csv_reader if row[0] != '')
+                if skip_rows:
+                    #skips the first few rows
+                    for _ in range(4):
+                        next(csv_reader)
+                total_size = sum(int(row[6]) for row in csv_reader if (row[0] != '' and row[6].isdigit()))
                 total_size_combo.append(total_size)
     return sum(total_size_combo)
 
@@ -247,14 +280,15 @@ def configure_output_dir(config_file, filename):
         os.mkdir(full_path)
     return full_path
 
-
 def main():
     welcome()
     cfg = json.load(open('config/config.json'))
     input_directory = cfg.get('input_folder')
     input_files = os.listdir(input_directory)
     try:
-        client = PreservicaDownloader(configure(cfg, 'output_folder'), configure(cfg, 'preservica_username'), configure_password(cfg), configure(cfg, 'tenant'), configure(cfg, 'preservica_api_url'))
+        client = PreservicaDownloader(configure(cfg, 'output_folder'), configure(cfg, 'preservica_username'), configure_password(cfg), configure(cfg, 'preservica_api_url'))
+        # data = testing(client)
+        # print(data)
         log.debug('Getting total file size')
         total_file_size = get_total_file_size(input_files, input_directory)
         master_task = progress.add_task("overall", total=total_file_size, filename="Overall Progress")
@@ -262,7 +296,7 @@ def main():
             with ThreadPoolExecutor(max_workers=8) as pool:
                 for filename in input_files:
                     if filename != '.DS_Store':
-                        csvfile, rowcount, input_csv = opencsvdict(f"{input_directory}/{filename}") 
+                        csvfile, rowcount, input_csv = opencsvdict(f"{input_directory}/{filename}")
                         directory_path = configure_output_dir(cfg, filename)
                         run_thread_pool_executor(pool, client, csvfile, master_task, directory_path)
     except (KeyboardInterrupt, SystemExit):
